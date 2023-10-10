@@ -1,0 +1,17 @@
+name: 'LIQPAY Payment'
+type: module
+description: 'Implements LiqPay payment gateway for commerce(Off-site redirect).'
+package: commerce
+core: 8.x
+core_version_requirement: ^8 || ^9
+configure: commerce_payment.configuration
+hidden: false
+dependencies:
+  - commerce:commerce_payment
+  - token
+
+
+# Information added by Drupal.org packaging script on 2020-04-29
+version: '8.x-1.0-alpha2'
+project: 'commerce_liqpay'
+datestamp: 1588152749

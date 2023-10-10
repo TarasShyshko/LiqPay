@@ -1,0 +1,258 @@
+<?php
+
+/**
+ * @file
+ * Implements LiqPay payment method for use with Drupal Commerce.
+ */
+
+define('COMMERCE_LIQPAY_CHECKOUT_URL', 'https://www.liqpay.ua/api/3/checkout');
+define('COMMERCE_LIQPAY_SERVER_PATH', 'checkout/payment/liqpay/server');
+define('COMMERCE_LIQPAY_RESULT_PATH', 'checkout/payment/liqpay');
+
+/**
+ * Implements hook_menu().
+ */
+function commerce_liqpay_menu() {
+  $items[COMMERCE_LIQPAY_SERVER_PATH] = array(
+    'title' => 'LiqPay Server',
+    'page callback' => 'commerce_liqpay_page_server',
+    'delivery callback' => 'drupal_json_output',
+    'file' => 'commerce_liqpay.pages.inc',
+    'type' => MENU_CALLBACK,
+
+    // This is a server-server communication page.
+    'access callback' => TRUE,
+  );
+
+  // Payer will be redirected to this page after the payment.
+  $items[COMMERCE_LIQPAY_RESULT_PATH] = array(
+    'title' => 'LiqPay',
+    'page callback' => 'commerce_liqpay_page_result',
+    'access arguments' => array('access checkout'),
+    'file' => 'commerce_liqpay.pages.inc',
+    'type' => MENU_CALLBACK,
+  );
+
+  return $items;
+}
+
+/**
+ * Implements hook_hook_info().
+ */
+function commerce_liqpay_hook_info() {
+  $hooks = array(
+    'commerce_liqpay_payment_api_data_alter' => array(
+      'group' => 'commerce',
+    ),
+  );
+
+  return $hooks;
+}
+
+/**
+ * Implements hook_help().
+ */
+function commerce_liqpay_help($path, $arg) {
+  switch ($path) {
+    case 'admin/help#commerce_liqpay':
+      $output = t('This module provides a Drupal Commerce payment method to embed the payment services provided by LiqPay.');
+      return $output;
+  }
+}
+
+/**
+ * Implements hook_form_FORM_ID_alter().
+ */
+function commerce_liqpay_form_rules_ui_edit_element_alter(&$form, &$form_state, $form_id) {
+  // We may have different structure here.
+  if (!empty($form_state['element_settings']['payment_method'])) {
+    $form['#payment_method'] = $form_state['element_settings']['payment_method'];
+  }
+  if (!empty($form['#payment_method']['method_id'])) {
+    $form['#payment_method'] = $form['#payment_method']['method_id'];
+  }
+
+  // Apply custom submit.
+  if (isset($form['#payment_method']) && $form['#payment_method'] === 'liqpay') {
+    $form['#submit'][] = 'commerce_liqpay_form_rules_ui_edit_element_submit';
+  }
+}
+
+/**
+ * Submit for CALLBACK_commerce_payment_method_settings_form().
+ */
+function commerce_liqpay_form_rules_ui_edit_element_submit($form, &$form_state) {
+  // Enable translation for description field.
+  $name = $form['#payment_method'];
+  $settings = $form_state['values']['parameter']['payment_method']['settings']['payment_method']['settings'];
+  commerce_i18n_string("commerce:payment_method:{$name}:description", $settings['description'], array('update' => TRUE));
+
+  // Enable translation for messages.
+  foreach ($settings['messages'] as $status => $message) {
+    commerce_i18n_string("commerce:payment_method:{$name}:message:{$status}", $message, array('update' => TRUE));
+  }
+}
+
+/**
+ * Returns an array of all handled LiqPay transaction statuses.
+ *
+ * See https://www.liqpay.ua/en/doc/callback for details.
+ *
+ * @param null|string $name
+ *   A status name. If null - returns an array of all statuses.
+ *
+ * @return array|bool
+ *   An array of the status information or FALSE if incorrect status name.
+ */
+function commerce_liqpay_transaction_statuses($name = NULL) {
+  $statuses = array(
+    // Success statuses.
+    'success' => array(
+      'status' => COMMERCE_PAYMENT_STATUS_SUCCESS,
+      'title' => t('Success'),
+      'message' => t('Payment completed.'),
+    ),
+    'reversed' => array(
+      'status' => COMMERCE_PAYMENT_STATUS_SUCCESS,
+      'title' => t('Reversed'),
+      'message' => t('Payment amount reversed to card holder.'),
+    ),
+    'sandbox' => array(
+      'status' => COMMERCE_PAYMENT_STATUS_SUCCESS,
+      'title' => t('Sandbox'),
+      'message' => t('Transaction marked as sandbox.'),
+    ),
+
+    // Failure status.
+    'failure' => array(
+      'status' => COMMERCE_PAYMENT_STATUS_FAILURE,
+      'title' => t('Failure'),
+      'message' => t('Payment marked as failed.'),
+    ),
+    'error' => array(
+      'status' => COMMERCE_PAYMENT_STATUS_FAILURE,
+      'title' => t('Error'),
+      'message' => t('Payment finished with error.'),
+    ),
+
+    // Pending statuses.
+    'processing' => array(
+      'status' => COMMERCE_PAYMENT_STATUS_PENDING,
+      'title' => t('Pending'),
+      'message' => t('Payment marked as processed.'),
+    ),
+    'cash_wait' => array(
+      'status' => COMMERCE_PAYMENT_STATUS_PENDING,
+      'title' => t('Waiting for cash'),
+      'message' => t('Order waiting for a payment with self-service terminal.'),
+    ),
+  );
+
+  if ($name) {
+    if (isset($statuses[$name])) {
+      return $statuses[$name];
+    }
+    return FALSE;
+  }
+
+  return $statuses;
+}
+
+/**
+ * Generate data array for LiqPay service.
+ *
+ * See https://www.liqpay.ua/en/doc/checkout for details.
+ *
+ * @param \stdClass $order
+ *   Commerce order.
+ * @param array $settings
+ *   Payment method settings.
+ *
+ * @return string
+ *   Encoded string with payment data.
+ */
+function commerce_liqpay_payment_data_encode(stdClass $order, array $settings) {
+  // Base required params.
+  $data = array(
+    'version' => 3,
+    'public_key' => $settings['public_key'],
+    'action' => 'pay',
+  );
+
+  // Currency and amount values.
+  $order_wrapper = entity_metadata_wrapper('commerce_order', $order);
+  $order_currency = $order_wrapper->commerce_order_total->currency_code->value();
+  $order_amount = $order_wrapper->commerce_order_total->amount->value();
+  $data['currency'] = $order_currency;
+  $data['amount'] = commerce_currency_amount_to_decimal($order_amount, $order_currency);
+
+  // Add result and server callbacks urls.
+  $data['result_url'] = url(COMMERCE_LIQPAY_RESULT_PATH, array(
+    'query' => array(
+      'redirect_key' => $order->data['payment_redirect_key'],
+      'order_id' => $order->order_id,
+    ),
+    'absolute' => TRUE,
+  ));
+  $data['server_url'] = url(COMMERCE_LIQPAY_SERVER_PATH, array('absolute' => TRUE));
+
+  // Add order specific data.
+  $data['order_id'] = (int) $order->order_id;
+  $data['description'] = commerce_i18n_string('commerce:payment_method:liqpay:description', $settings['description']);
+  $data['description'] = token_replace($data['description'], array('commerce-order' => $order));
+
+  // Handle sandbox mode.
+  if ($settings['sandbox'] == TRUE) {
+    $data['sandbox'] = 1;
+    $data['description'] .= ' [SANDBOX MODE]';
+  }
+
+  // Invoke the hook here so implementations have access to the order and
+  // payment data that will be processed with LiqPay service.
+  module_invoke_all('commerce_liqpay_payment_data_alter', $order, $settings, $data);
+
+  return base64_encode(drupal_json_encode($data));
+}
+
+/**
+ * Decode data array from LiqPay service.
+ *
+ * @return array|bool
+ *   Decoded values from LigPay response or FALSE if data can't be decoded.
+ */
+function commerce_liqpay_payment_data_decode($data_encoded) {
+  if (!empty($data_encoded)) {
+    if ($data_decoded = base64_decode($data_encoded)) {
+      if ($data = drupal_json_decode($data_decoded)) {
+        if (!empty($data)) {
+          return $data;
+        }
+      }
+    }
+  }
+  return FALSE;
+}
+
+/**
+ * Generate signature string according to LiqPay rules.
+ *
+ * See https://www.liqpay.ua/en/doc/checkout for more details.
+ *
+ * @return string
+ *   Encoded signature required by LiqPay API.
+ */
+function commerce_liqpay_generate_signature($data, $private_key) {
+  return base64_encode(sha1($private_key . $data . $private_key, 1));
+}
+
+/**
+ * Returns an array of all possible currency codes for LiqPay service.
+ *
+ * Find more about allowed currencies at https://www.liqpay.ua/en/doc/checkout.
+ *
+ * @return array
+ *   List of allowed currencies.
+ */
+function commerce_liqpay_currencies() {
+  return drupal_map_assoc(array('USD', 'EUR', 'RUB', 'UAH'));
+}
